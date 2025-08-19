@@ -6,8 +6,8 @@ from telegram.ext import (
 )
 
 # === Конфигурация ===
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")  # храните токен как секрет в Render
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")        # URL вашего Apps Script webhook
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")  # токен Telegram
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")        # URL Google Apps Script webhook
 
 # Загружаем вопросы
 with open("questions.json", "r", encoding="utf-8") as f:
@@ -33,7 +33,7 @@ async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_question(query, items[0])
 
 async def show_question(query, q):
-    text = f"Вопрос: {q['task']}\nКод: {q['code']}"
+    text = f"Вопрос: {q['question']}"
     options = [
         [
             InlineKeyboardButton("Да", callback_data=f"ans|yes|{q['id']}"),
@@ -51,7 +51,6 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     qid = int(data[2])
     user_id = update.effective_user.id
 
-    # ищем вопрос
     q = next((item for item in questions if item["id"] == qid), None)
     if not q:
         await query.edit_message_text("Ошибка: вопрос не найден.")
@@ -75,9 +74,9 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "user_id": str(user_id),
         "category": q["category"],
-        "task": q["task"],
+        "task": q["question"],
         "answer": "Да",
-        "code": q["code"],
+        "code": q.get("code", ""),
         "comment": ""
     }
     try:
@@ -100,9 +99,9 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "user_id": str(user_id),
         "category": q["category"],
-        "task": q["task"],
-        "answer": pending["answer"],   # "Нет" или "Частично"
-        "code": q["code"],
+        "task": q["question"],
+        "answer": pending["answer"],
+        "code": q.get("code", ""),
         "comment": update.message.text
     }
     try:
@@ -131,7 +130,7 @@ async def go_next_question(message_or_query, context):
             await show_question(message_or_query, next_q)
         else:
             await message_or_query.reply_text(
-                f"Вопрос: {next_q['task']}\nКод: {next_q['code']}",
+                f"Вопрос: {next_q['question']}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
     else:
@@ -147,7 +146,16 @@ def main():
     app.add_handler(CallbackQueryHandler(on_category, pattern=r"^cat\|"))
     app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^ans\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_comment))
-    app.run_polling()
+
+    # Render даёт порт в переменной окружения
+    port = int(os.environ.get("PORT", 8080))
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=f"https://audit-91nm.onrender.com/{TELEGRAM_TOKEN}"
+    )
 
 if __name__ == "__main__":
     main()
