@@ -13,21 +13,22 @@ from telegram.ext import (
 )
 
 # =========================
-# Конфигурация (через Render → Environment)
+# Конфигурация (Render → Environment)
 # =========================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-WEBHOOK_BASE = os.environ.get("WEBHOOK_URL", "").rstrip("/")   # Render URL
-GSCRIPT_URL   = os.environ.get("GSCRIPT_URL", "").rstrip("/") # Google Apps Script URL
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()   # токен бота
+WEBHOOK_BASE   = os.environ.get("WEBHOOK_URL", "").rstrip("/")  # Render URL
+GSCRIPT_URL    = os.environ.get("GSCRIPT_URL", "").rstrip("/") # Google Apps Script URL
 PORT = int(os.environ.get("PORT", 8443))
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Не задан TELEGRAM_TOKEN в переменных окружения Render.")
 if not WEBHOOK_BASE.startswith("https://"):
     raise RuntimeError("WEBHOOK_URL должен быть публичным HTTPS URL вашего сервиса на Render.")
+if not GSCRIPT_URL.startswith("https://"):
+    raise RuntimeError("GSCRIPT_URL должен быть публичным HTTPS URL вашего Google Apps Script.")
 
 # =========================
-# Данные вопросов
-# формат items: [{"id":1,"category":"...","task":"...","code":"...?"}, ...]
+# Вопросы (questions.json)
 # =========================
 with open("questions.json", "r", encoding="utf-8") as f:
     questions = json.load(f)
@@ -58,7 +59,7 @@ async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Нет вопросов в этой категории.")
         return
 
-    # сбрасываем состояние текущего прогресса
+    # сбрасываем состояние прогресса
     context.user_data["current"] = {"category": category, "index": 0, "items": items}
     await show_question(query, items[0])
 
@@ -96,7 +97,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ошибка: вопрос не найден.")
         return
 
-    # Если "Нет" или "Частично" — ждём текстовый комментарий
+    # "Нет" или "Частично" → ждём комментарий
     if answer in ("no", "part"):
         context.user_data["pending"] = {
             "question": q,
@@ -108,7 +109,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Если "Да" — отправляем сразу без комментария
+    # "Да" → отправляем сразу
     await send_to_webhook(
         user_id=user_id,
         category=q.get("category", ""),
@@ -120,12 +121,11 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await go_next_question(query, context)
 
 # =========================
-# Приём комментария (текст) после "Нет/Частично"
+# Приём комментария (текст после "Нет/Частично")
 # =========================
 async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "pending" not in context.user_data:
-        # это обычный текст не по теме — игнорируем в рамках опроса
-        return
+        return  # текст не по теме
 
     pending = context.user_data.pop("pending")
     q = pending["question"]
@@ -136,7 +136,7 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id=user_id,
         category=q.get("category", ""),
         task=q.get("task", ""),
-        answer=pending["answer"],  # "Нет" или "Частично"
+        answer=pending["answer"],
         code=q.get("code", ""),
         comment=comment_text
     )
@@ -157,11 +157,9 @@ async def go_next_question(message_or_query, context: ContextTypes.DEFAULT_TYPE)
 
     if idx < len(items):
         next_q = items[idx]
-        if hasattr(message_or_query, "edit_message_text"):
-            # пришли из callbackQuery
+        if hasattr(message_or_query, "edit_message_text"):  # callbackQuery
             await show_question(message_or_query, next_q)
-        else:
-            # пришли из обычного сообщения (после комментария)
+        else:  # текст после комментария
             task = next_q.get("task", "")
             code = next_q.get("code", "")
             text = f"Вопрос: {task}" + (f"\nКод: {code}" if code else "")
@@ -172,7 +170,7 @@ async def go_next_question(message_or_query, context: ContextTypes.DEFAULT_TYPE)
             ]]
             await message_or_query.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        # завершение чек-листа
+        # чек-лист завершён
         if hasattr(message_or_query, "reply_text"):
             await message_or_query.reply_text("Чек-лист завершён ✅ Спасибо!")
         else:
@@ -180,7 +178,7 @@ async def go_next_question(message_or_query, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("current", None)
 
 # =========================
-# Отправка результатов в Google Apps Script (ваша таблица)
+# Отправка результатов в Google Apps Script
 # =========================
 async def send_to_webhook(user_id: int, category: str, task: str, answer: str, code: str, comment: str):
     payload = {
@@ -193,10 +191,8 @@ async def send_to_webhook(user_id: int, category: str, task: str, answer: str, c
         "comment": comment or ""
     }
     try:
-        # POST JSON на ваш Apps Script Web App URL
-        requests.post(WEBHOOK_BASE, json=payload, timeout=7)
+        requests.post(GSCRIPT_URL, json=payload, timeout=7)
     except Exception as e:
-        # логируем, но не падаем
         print("Ошибка при отправке в Webhook:", e)
 
 # =========================
@@ -211,11 +207,11 @@ def main():
     app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^ans\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_comment))
 
-    # Запуск вебхука (PTB сам поднимет aiohttp-сервер)
+    # Запуск вебхука
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=TELEGRAM_TOKEN,  # секретный путь
+        url_path=TELEGRAM_TOKEN,
         webhook_url=f"{WEBHOOK_BASE}/{TELEGRAM_TOKEN}",
         drop_pending_updates=True,
     )
