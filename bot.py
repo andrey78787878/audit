@@ -33,7 +33,7 @@ async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_question(query, items[0])
 
 async def show_question(query, q):
-    text = f"Вопрос: {q['question']}"
+    text = f"Вопрос: {q['task']}"  # заменил на task, т.к. в questions.json нет 'question'
     options = [
         [
             InlineKeyboardButton("Да", callback_data=f"ans|yes|{q['id']}"),
@@ -74,7 +74,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "user_id": str(user_id),
         "category": q["category"],
-        "task": q["question"],
+        "task": q["task"],
         "answer": "Да",
         "code": q.get("code", ""),
         "comment": ""
@@ -99,7 +99,7 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "user_id": str(user_id),
         "category": q["category"],
-        "task": q["question"],
+        "task": q["task"],
         "answer": pending["answer"],
         "code": q.get("code", ""),
         "comment": update.message.text
@@ -130,7 +130,7 @@ async def go_next_question(message_or_query, context):
             await show_question(message_or_query, next_q)
         else:
             await message_or_query.reply_text(
-                f"Вопрос: {next_q['question']}",
+                f"Вопрос: {next_q['task']}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
     else:
