@@ -15,8 +15,9 @@ from telegram.ext import (
 # =========================
 # Конфигурация (через Render → Environment)
 # =========================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()  # токен бота от @BotFather
-WEBHOOK_BASE = os.environ.get("WEBHOOK_URL", "").rstrip("/")   # публичный URL сервиса Render (например, https://audit-91nm.onrender.com)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+WEBHOOK_BASE = os.environ.get("WEBHOOK_URL", "").rstrip("/")   # Render URL
+GSCRIPT_URL   = os.environ.get("GSCRIPT_URL", "").rstrip("/") # Google Apps Script URL
 PORT = int(os.environ.get("PORT", 8443))
 
 if not TELEGRAM_TOKEN:
