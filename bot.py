@@ -12,170 +12,239 @@ from telegram.ext import (
     filters,
 )
 
-# ----------------------------
+# =========================
 # Конфигурация
-# ----------------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+# =========================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8443))
 
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("Не задан TELEGRAM_TOKEN")
-if not WEBHOOK_URL.startswith("https://"):
-    raise RuntimeError("WEBHOOK_URL должен быть публичным HTTPS URL")
-
-# ----------------------------
+# =========================
 # Загружаем вопросы
-# ----------------------------
-with open("questions.json", "r", encoding="utf-8") as f:
-    questions = json.load(f)
-    if not isinstance(questions, list):
-        raise RuntimeError("questions.json должен содержать список объектов")
+# =========================
+try:
+    with open("questions.json", "r", encoding="utf-8") as f:
+        questions = json.load(f)
+except FileNotFoundError:
+    print("Ошибка: файл questions.json не найден!")
+    questions = []
+except json.JSONDecodeError:
+    print("Ошибка: неверный формат questions.json!")
+    questions = []
 
-# ----------------------------
+# =========================
 # /start
-# ----------------------------
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not questions:
+        await update.message.reply_text("❌ Ошибка: вопросы не загружены!")
+        return
+        
     categories = sorted({q["category"] for q in questions})
     keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat|{cat}")] for cat in categories]
     await update.message.reply_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ----------------------------
+# =========================
 # Выбор категории
-# ----------------------------
+# =========================
 async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    category = query.data.split("|", 1)[1]
+    category = query.data.split("|")[1]
     items = [q for q in questions if q["category"] == category]
+    
     if not items:
-        await query.edit_message_text("Нет вопросов в этой категории.")
+        await query.edit_message_text("❌ В этой категории нет вопросов!")
         return
-    context.user_data["current"] = {"category": category, "index": 0, "items": items}
+        
+    context.user_data["current"] = {"items": items, "index": 0}
     await show_question(query, items[0])
 
-# ----------------------------
+# =========================
 # Показ вопроса
-# ----------------------------
+# =========================
 async def show_question(query, q):
-    text = f"Вопрос: {q.get('task','')}"
+    text = f"📋 Вопрос: {q['task']}"
     if q.get("code"):
-        text += f"\nКод: {q['code']}"
+        text += f"\n\n💻 Код:\n<code>{q['code']}</code>"
+    
     keyboard = [[
-        InlineKeyboardButton("Да", callback_data=f"ans|yes|{q['id']}"),
-        InlineKeyboardButton("Нет", callback_data=f"ans|no|{q['id']}"),
-        InlineKeyboardButton("Частично", callback_data=f"ans|part|{q['id']}"),
+        InlineKeyboardButton("✅ Да", callback_data=f"ans|yes|{q['id']}"),
+        InlineKeyboardButton("❌ Нет", callback_data=f"ans|no|{q['id']}"),
+        InlineKeyboardButton("🟡 Частично", callback_data=f"ans|part|{q['id']}")
     ]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-# ----------------------------
-# Ответ на вопрос
-# ----------------------------
+# =========================
+# Ответ на вопрос (кнопки)
+# =========================
 async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, answer, id_str = query.data.split("|")
-    qid = int(id_str)
-    q = next((item for item in questions if item["id"] == qid), None)
-    if not q:
-        await query.edit_message_text("Вопрос не найден.")
+    _, ans, qid = query.data.split("|")
+    qid = int(qid)
+    
+    try:
+        q = next(x for x in questions if x["id"] == qid)
+    except StopIteration:
+        await query.edit_message_text("❌ Вопрос не найден!")
         return
+        
     user_id = update.effective_user.id
 
-    if answer in ("no", "part"):
+    if ans in ("no", "part"):
+        # ждём текстовый комментарий
         context.user_data["pending"] = {
             "question": q,
-            "answer": "Нет" if answer=="no" else "Частично",
+            "answer": "Нет" if ans == "no" else "Частично",
             "user_id": user_id
         }
-        await query.edit_message_text(f"Вы выбрали '{context.user_data['pending']['answer']}'. Введите комментарий:")
+        await query.edit_message_text(
+            f"Вы выбрали «{'Нет' if ans == 'no' else 'Частично'}». \n"
+            "📝 Введите, пожалуйста, комментарий одним сообщением:"
+        )
         return
 
-    # Если Да — сразу отправляем
-    await send_to_webhook(user_id, q["category"], q["task"], "Да", q.get("code",""), "")
+    # Если "Да" — отправляем сразу
+    await send_to_webhook(user_id, q, "Да", "")
     await go_next_question(query, context)
 
-# ----------------------------
-# Комментарий после Нет/Частично
-# ----------------------------
+# =========================
+# Приём комментария
+# =========================
 async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "pending" not in context.user_data:
+        await update.message.reply_text("❌ Нет ожидающих комментариев. Используйте /start чтобы начать заново.")
         return
+
     pending = context.user_data.pop("pending")
     q = pending["question"]
-    comment = update.message.text
-    await send_to_webhook(pending["user_id"], q["category"], q["task"], pending["answer"], q.get("code",""), comment)
-    await update.message.reply_text("Комментарий сохранён ✅")
+    user_id = pending["user_id"]
+    comment_text = update.message.text.strip()
+    
+    if not comment_text:
+        await update.message.reply_text("❌ Комментарий не может быть пустым. Попробуйте снова:")
+        context.user_data["pending"] = pending  # Возвращаем обратно
+        return
+        
+    await send_to_webhook(user_id, q, pending["answer"], comment_text)
+    await update.message.reply_text("✅ Комментарий сохранён")
     await go_next_question(update.message, context)
 
-# ----------------------------
+# =========================
 # Переход к следующему вопросу
-# ----------------------------
-async def go_next_question(msg, context: ContextTypes.DEFAULT_TYPE):
-    current = context.user_data.get("current")
-    if not current:
-        return
-    items = current["items"]
-    idx = current["index"] + 1
+# =========================
+async def go_next_question(message_or_query, context):
+    current = context.user_data.get("current", {})
+    items = current.get("items", [])
+    idx = current.get("index", 0) + 1
     context.user_data["current"]["index"] = idx
 
     if idx < len(items):
         next_q = items[idx]
-        if hasattr(msg, "edit_message_text"):
-            await show_question(msg, next_q)
+        if hasattr(message_or_query, "edit_message_text"):
+            await show_question(message_or_query, next_q)
         else:
-            text = f"Вопрос: {next_q.get('task','')}"
+            text = f"📋 Вопрос: {next_q['task']}"
             if next_q.get("code"):
-                text += f"\nКод: {next_q['code']}"
+                text += f"\n\n💻 Код:\n<code>{next_q['code']}</code>"
+                
             keyboard = [[
-                InlineKeyboardButton("Да", callback_data=f"ans|yes|{next_q['id']}"),
-                InlineKeyboardButton("Нет", callback_data=f"ans|no|{next_q['id']}"),
-                InlineKeyboardButton("Частично", callback_data=f"ans|part|{next_q['id']}"),
+                InlineKeyboardButton("✅ Да", callback_data=f"ans|yes|{next_q['id']}"),
+                InlineKeyboardButton("❌ Нет", callback_data=f"ans|no|{next_q['id']}"),
+                InlineKeyboardButton("🟡 Частично", callback_data=f"ans|part|{next_q['id']}")
             ]]
-            await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await message_or_query.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     else:
-        # конец
-        if hasattr(msg, "reply_text"):
-            await msg.reply_text("Чек-лист завершён ✅ Спасибо!")
+        if hasattr(message_or_query, "reply_text"):
+            await message_or_query.reply_text("🎉 Чек-лист завершён! Спасибо за участие!")
         else:
-            await msg.edit_message_text("Чек-лист завершён ✅ Спасибо!")
+            await message_or_query.edit_message_text("🎉 Чек-лист завершён! Спасибо за участие!")
         context.user_data.pop("current", None)
 
-# ----------------------------
+# =========================
 # Отправка в Google Apps Script
-# ----------------------------
-async def send_to_webhook(user_id, category, task, answer, code, comment):
+# =========================
+async def send_to_webhook(user_id, q, answer, comment):
     payload = {
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "user_id": str(user_id),
-        "category": category,
-        "task": task,
+        "category": q["category"],
+        "task": q["task"],
         "answer": answer,
-        "code": code or "",
-        "comment": comment or ""
+        "code": q.get("code", ""),
+        "comment": comment
     }
     try:
-        requests.post(WEBHOOK_URL, json=payload, timeout=7)
+        response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        if response.status_code != 200:
+            print(f"Ошибка отправки: статус {response.status_code}")
     except Exception as e:
-        print("Ошибка отправки в Webhook:", e)
+        print(f"Ошибка отправки: {e}")
 
-# ----------------------------
-# Точка входа
-# ----------------------------
+# =========================
+# Команда /cancel для отмены
+# =========================
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "pending" in context.user_data:
+        context.user_data.pop("pending")
+    if "current" in context.user_data:
+        context.user_data.pop("current")
+    await update.message.reply_text("❌ Операция отменена. Используйте /start чтобы начать заново.")
+
+# =========================
+# Обработка ошибок
+# =========================
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Ошибка: {context.error}")
+    if update and update.effective_message:
+        await update.effective_message.reply_text("❌ Произошла ошибка. Попробуйте /start")
+
+# =========================
+# Основной запуск
+# =========================
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_category, pattern=r"^cat\|"))
-    app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^ans\|"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_comment))
+    # Проверка переменных окружения
+    if not TELEGRAM_TOKEN:
+        print("❌ Ошибка: TELEGRAM_TOKEN не установлен!")
+        return
+        
+    if not WEBHOOK_URL:
+        print("❌ Ошибка: WEBHOOK_URL не установлен!")
+        return
+        
+    if not questions:
+        print("❌ Ошибка: вопросы не загружены!")
+        return
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-        drop_pending_updates=True,
-    )
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Добавляем обработчики
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CallbackQueryHandler(on_category, pattern="^cat\|"))
+    app.add_handler(CallbackQueryHandler(on_answer, pattern="^ans\|"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_comment))
+    
+    # Обработчик ошибок
+    app.add_error_handler(error_handler)
+
+    print("🤖 Бот запускается...")
+    print(f"📊 Загружено вопросов: {len(questions)}")
+    
+    try:
+        # Запуск webhook
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+            drop_pending_updates=True
+        )
+        print("✅ Webhook запущен успешно!")
+    except Exception as e:
+        print(f"❌ Ошибка webhook: {e}")
+        print("🔄 Запуск в режиме polling...")
+        app.run_polling()
 
 if __name__ == "__main__":
     main()
